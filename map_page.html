@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>校园跑地图定位</title>
+<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+  html, body { margin:0; padding:0; height:100%; font-family: "Microsoft YaHei", sans-serif; }
+  #map { position:absolute; top:56px; left:0; right:0; bottom:0; }
+  #toolbar {
+    position:absolute; top:0; left:0; right:0; height:56px;
+    background:#1f2937; color:#fff; display:flex; align-items:center;
+    padding:0 10px; gap:8px; box-sizing:border-box; z-index:1000; font-size:13px;
+  }
+  #toolbar input {
+    width:170px; padding:6px 8px; border:none; border-radius:4px; font-size:13px; outline:none;
+  }
+  #toolbar button {
+    padding:6px 12px; border:none; border-radius:4px; cursor:pointer; font-size:13px; background:#3b82f6; color:#fff;
+  }
+  #toolbar button:hover { background:#2563eb; }
+  #status { margin-left:auto; color:#86efac; font-size:12px; white-space:nowrap; }
+  #coordTip {
+    position:absolute; bottom:30px; left:50%; transform:translateX(-50%);
+    background:rgba(17,24,39,0.9); color:#fff; padding:8px 14px; border-radius:6px;
+    font-size:13px; display:none; z-index:1000; box-shadow:0 2px 8px rgba(0,0,0,.4);
+  }
+  .leaflet-container { background:#0b1220; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span style="font-weight:bold;">📍 地图定位</span>
+  <input id="coordInput" placeholder="输入坐标 纬度,经度 (百度坐标)" spellcheck="false">
+  <button onclick="locateInput()">定位</button>
+  <button onclick="locateStart()">回到起点</button>
+  <span id="status">服务连接中...</span>
+</div>
+<div id="map"></div>
+<div id="coordTip"></div>
+
+<script src="https://cdn.bootcdn.net/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+// ============ 百度坐标(BD09) <-> 高德坐标(GCJ02) 转换 ============
+var x_pi = (Math.PI * 3000.0) / 180.0;
+
+function bd09ToGcj02(lng, lat) {
+  var x = lng - 0.0065, y = lat - 0.006;
+  var z = Math.sqrt(x*x + y*y) - 0.00002 * Math.sin(y * x_pi);
+  var theta = Math.atan2(y, x) - 0.000003 * Math.cos(x * x_pi);
+  return [z * Math.cos(theta), z * Math.sin(theta)];
+}
+
+function gcj02ToBd09(lng, lat) {
+  var z = Math.sqrt(lng*lng + lat*lat) + 0.00002 * Math.sin(lat * x_pi);
+  var theta = Math.atan2(lat, lng) + 0.000003 * Math.cos(lng * x_pi);
+  return [z * Math.cos(theta) + 0.0065, z * Math.sin(theta) + 0.006];
+}
+
+// ============ 地图初始化（高德卫星底图，GCJ02网格直接对齐） ============
+// 中心：哈尔滨理工西区操场（百度坐标转GCJ02）
+var startBd = [45.7199, 126.6210];
+var startGcj = bd09ToGcj02(startBd[1], startBd[0]);
+
+var map = L.map('map', { zoomControl: true }).setView([startGcj[1], startGcj[0]], 17);
+
+L.tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}', {
+  subdomains: ['1','2','3','4'],
+  maxZoom: 19,
+  attribution: '高德卫星'
+}).addTo(map);
+
+L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}', {
+  subdomains: ['1','2','3','4'],
+  maxZoom: 19,
+  opacity: 0
+}).addTo(map);
+
+// ============ 当前定位标记 ============
+var currentMarker = L.marker([startGcj[1], startGcj[0]], {
+  icon: L.divIcon({ html: '<div style="width:18px;height:18px;border-radius:50%;background:#ef4444;border:3px solid #fff;box-shadow:0 0 6px rgba(239,68,68,.8);"></div>', className: '', iconSize: [18,18] })
+}).addTo(map).bindPopup('当前位置');
+
+// ============ 加载跑道路线（route.txt = 高德坐标GCJ02，经度,纬度，可直接显示） ============
+var routeLine = null;
+var routePoints = [];
+
+fetch('/api/route')
+  .then(r => r.json())
+  .then(data => {
+    if (!data.ok || !data.points || data.points.length < 2) {
+      setStatus('路线文件为空', true);
+      return;
+    }
+    routePoints = data.points;   // 每点 [经度, 纬度] GCJ02
+    var latlngs = [];
+    for (var i = 0; i < data.points.length; i++) {
+      var p = data.points[i];
+      latlngs.push([p[1], p[0]]);  // GCJ02 纬度,经度 → 高德瓦片直接对齐
+    }
+    routeLine = L.polyline(latlngs, {
+      color: '#3b82f6', weight: 4, opacity: 0.75
+    }).addTo(map);
+    // 画起点
+    L.circleMarker(latlngs[0], { radius: 7, color: '#22c55e', weight: 3 }).addTo(map).bindPopup('路线起点');
+    map.fitBounds(routeLine.getBounds().pad(0.2));
+    setStatus('路线已加载');
+  })
+  .catch(() => setStatus('路线加载失败', true));
+
+// ============ 点击地图定位 ============
+map.on('click', function(e) {
+  var gcjLng = e.latlng.lng, gcjLat = e.latlng.lat;
+  var bd = gcj02ToBd09(gcjLng, gcjLat);
+  var bdLat = bd[1].toFixed(6), bdLng = bd[0].toFixed(6);
+  showTip('点击位置: 纬度 ' + bdLat + '  经度 ' + bdLng + ' → 正在定位...');
+  currentMarker.setLatLng([gcjLat, gcjLng]);
+  sendLoc(parseFloat(bdLat), parseFloat(bdLng));
+});
+
+// ============ 发送定位到模拟器 ============
+function sendLoc(lat, lng) {
+  fetch('/api/setloc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lat: lat, lng: lng })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.ok) {
+      showTip('✅ 已定位到: ' + lat.toFixed(6) + ', ' + lng.toFixed(6));
+      setStatus('已定位');
+    } else {
+      showTip('❌ 定位失败: ' + (data.error || '未知错误'));
+      setStatus('定位失败', true);
+    }
+  })
+  .catch(() => {
+    showTip('❌ 定位请求失败，检查服务');
+    setStatus('连接断开', true);
+  });
+}
+
+// ============ 输入框定位（纬度,经度，百度坐标） ============
+function locateInput() {
+  var val = document.getElementById('coordInput').value.trim();
+  if (!val) return;
+  var parts = val.split(/[,，\s]+/);
+  if (parts.length < 2) { showTip('格式错误：请输入 纬度,经度'); return; }
+  var lat = parseFloat(parts[0]), lng = parseFloat(parts[1]);
+  if (isNaN(lat) || isNaN(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    showTip('坐标无效，请检查');
+    return;
+  }
+  var g = bd09ToGcj02(lng, lat);
+  currentMarker.setLatLng([g[1], g[0]]);
+  map.setView([g[1], g[0]], 18);
+  sendLoc(lat, lng);
+}
+
+// ============ 回到起点 ============
+function locateStart() {
+  if (routePoints.length === 0) { showTip('没有路线数据'); return; }
+  var p = routePoints[0];   // [经度, 纬度] GCJ02
+  var gLat = p[1], gLng = p[0];
+  currentMarker.setLatLng([gLat, gLng]);
+  map.setView([gLat, gLng], 18);
+  var bd = gcj02ToBd09(gLng, gLat);
+  sendLoc(bd[1], bd[0]);
+}
+
+// ============ 辅助UI ============
+function showTip(msg) {
+  var el = document.getElementById('coordTip');
+  el.textContent = msg;
+  el.style.display = 'block';
+  clearTimeout(showTip._t);
+  showTip._t = setTimeout(function(){ el.style.display = 'none'; }, 4000);
+}
+
+function setStatus(msg, isErr) {
+  var el = document.getElementById('status');
+  el.textContent = msg;
+  el.style.color = isErr ? '#f87171' : '#86efac';
+}
+
+// ============ 实时刷新当前定位（跑步时红点跟着走，每秒查一次） ============
+var userDragged = false;  // 用户手动拖地图后暂停自动跟随
+map.on('dragstart', function(){ userDragged = true; });
+map.on('zoomstart', function(){ userDragged = true; });
+
+setInterval(function() {
+  fetch('/api/current')
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok && d.lat != null && d.lng != null) {
+        var g = bd09ToGcj02(d.lng, d.lat);
+        currentMarker.setLatLng([g[1], g[0]]);
+        if (!userDragged) {
+          map.setView([g[1], g[0]], map.getZoom());
+        }
+      }
+    })
+    .catch(function(){});
+}, 1000);
+
+// 健康检查
+fetch('/api/health').then(r => r.json()).then(d => setStatus('服务正常')).catch(() => setStatus('服务断开', true));
+</script>
+</body>
+</html>

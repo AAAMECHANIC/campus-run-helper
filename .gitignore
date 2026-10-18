@@ -1,0 +1,16 @@
+# 大型文件与安装包不上传
+*.zip
+*.exe
+platform-tools/
+MuMu模拟器安装包.exe
+
+# 隐私/敏感数据不上传
+route.txt
+伪装模块/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 本地效果图
+10米宽跑道效果图*.png
